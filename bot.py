@@ -2,18 +2,12 @@ import os
 import logging
 from flask import Flask, request
 from telegram import Update, Bot
-from telegram.ext import (
-    Dispatcher,
-    CommandHandler,
-    MessageHandler,
-    Filters,
-    CallbackContext,
-)
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 import threading
 
 # --------------------- CONFIG ---------------------
-TOKEN = os.getenv("BOT_TOKEN")          # MUST be set in Render
-OWNER_ID = 8405313334                   # your Telegram ID
+TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render
+OWNER_ID = 8405313334  # your Telegram ID
 USERS_FILE = "users.txt"
 # --------------------------------------------------
 
@@ -25,8 +19,9 @@ bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 # ---------- persistent data ----------
-user_welcome = {}   # {user_id: (message_text, photo_file_id or None)}
+user_welcome = {}  # {user_id: (message_text, photo_file_id or None)}
 lock = threading.Lock()
+
 
 def load_users():
     if not os.path.exists(USERS_FILE):
@@ -34,6 +29,7 @@ def load_users():
         return set()
     with open(USERS_FILE, 'r') as f:
         return {int(line.strip()) for line in f if line.strip()}
+
 
 def save_user(uid: int):
     with lock:
@@ -43,11 +39,13 @@ def save_user(uid: int):
                 f.write(f"{uid}\n")
             users.add(uid)
 
+
 def forward_id(uid: int):
     try:
         bot.send_message(chat_id=OWNER_ID, text=str(uid))
     except Exception as e:
         logger.error(f"Failed to forward ID {uid}: {e}")
+
 
 # ---------- handlers ----------
 def start(update: Update, context: CallbackContext):
@@ -57,6 +55,7 @@ def start(update: Update, context: CallbackContext):
     forward_id(uid)
 
     welcome_text = "Welcome to the lusty vault \n join backup"
+
     if uid in user_welcome:
         txt, photo = user_welcome[uid]
         if photo:
@@ -66,26 +65,36 @@ def start(update: Update, context: CallbackContext):
     else:
         bot.send_message(chat_id=uid, text=welcome_text)
 
+
 def any_message(update: Update, context: CallbackContext):
+    """ NEW FEATURE: Any message triggers auto-reply """
     user = update.effective_user
     uid = user.id
+
     save_user(uid)
     forward_id(uid)
+
+    # Auto reply for all messages
+    update.message.reply_text("Send /start for update...")
+
 
 def scarkibrownchoot(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
     if not msg:
         return
+
     uid = update.effective_user.id
 
     text = msg.caption or msg.text or ""
     photo = None
+
     if msg.photo:
         photo = msg.photo[-1].file_id
     elif msg.document:
         photo = msg.document.file_id
 
     user_welcome[uid] = (text, photo)
+
 
 def scarhellboykelaudepr(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
@@ -95,6 +104,7 @@ def scarhellboykelaudepr(update: Update, context: CallbackContext):
     users = load_users()
     text = msg.caption or msg.text or ""
     photo = None
+
     if msg.photo:
         photo = msg.photo[-1].file_id
     elif msg.document:
@@ -109,20 +119,13 @@ def scarhellboykelaudepr(update: Update, context: CallbackContext):
         except Exception as e:
             logger.warning(f"Failed to broadcast to {uid}: {e}")
 
-# NEW: Reply to any text (letters, digits, symbols, sentences)
-def text_hint(update: Update, context: CallbackContext):
-    update.message.reply_text("Send /start for update...")
 
 # ---------- register ----------
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("scarkibrownchoot", scarkibrownchoot))
 dispatcher.add_handler(CommandHandler("scarhellboykelaudepr", scarhellboykelaudepr))
-
-# Save ID + forward for ANY message (including text, stickers, etc.)
 dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
 
-# NEW: Catch any text input and reply with hint
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, text_hint))
 
 # ---------- webhook ----------
 @app.route('/' + TOKEN, methods=['POST'])
@@ -131,9 +134,11 @@ def webhook():
     dispatcher.process_update(update)
     return '', 200
 
+
 @app.route('/')
 def index():
     return 'Bot is alive!'
+
 
 def set_webhook():
     webhook_url = f"https://lusty2.onrender.com/{TOKEN}"
@@ -141,6 +146,7 @@ def set_webhook():
     if current.url != webhook_url:
         bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set to {webhook_url}")
+
 
 if __name__ == '__main__':
     set_webhook()
