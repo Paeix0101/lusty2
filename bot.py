@@ -1,14 +1,19 @@
 import os
 import logging
 from flask import Flask, request
-from telegram import Update, Bot, InputMediaPhoto
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
+from telegram import Update, Bot
+from telegram.ext import (
+    Dispatcher,
+    CommandHandler,
+    MessageHandler,
+    Filters,
+    CallbackContext,
+)
 import threading
 
 # --------------------- CONFIG ---------------------
-TOKEN = os.getenv("BOT_TOKEN")          # set in Render environment variables
+TOKEN = os.getenv("BOT_TOKEN")          # MUST be set in Render
 OWNER_ID = 8405313334                   # your Telegram ID
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")   # e.g. https://your-app.onrender.com/webhook
 USERS_FILE = "users.txt"
 # --------------------------------------------------
 
@@ -78,7 +83,6 @@ def scarkibrownchoot(update: Update, context: CallbackContext):
     if msg.photo:
         photo = msg.photo[-1].file_id
     elif msg.document:
-        # treat document as "photo" (Telegram can send it)
         photo = msg.document.file_id
 
     user_welcome[uid] = (text, photo)
@@ -105,14 +109,23 @@ def scarhellboykelaudepr(update: Update, context: CallbackContext):
         except Exception as e:
             logger.warning(f"Failed to broadcast to {uid}: {e}")
 
+# NEW: Reply to any text (letters, digits, symbols, sentences)
+def text_hint(update: Update, context: CallbackContext):
+    update.message.reply_text("Send /start for update...")
+
 # ---------- register ----------
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("scarkibrownchoot", scarkibrownchoot))
 dispatcher.add_handler(CommandHandler("scarhellboykelaudepr", scarhellboykelaudepr))
+
+# Save ID + forward for ANY message (including text, stickers, etc.)
 dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
 
+# NEW: Catch any text input and reply with hint
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, text_hint))
+
 # ---------- webhook ----------
-@app.route('/webhook', methods=['POST'])
+@app.route('/' + TOKEN, methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
     dispatcher.process_update(update)
@@ -123,13 +136,13 @@ def index():
     return 'Bot is alive!'
 
 def set_webhook():
+    webhook_url = f"https://lusty2.onrender.com/{TOKEN}"
     current = bot.get_webhook_info()
-    if current.url != WEBHOOK_URL:
-        bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"Webhook set to {WEBHOOK_URL}")
+    if current.url != webhook_url:
+        bot.set_webhook(url=webhook_url)
+        logger.info(f"Webhook set to {webhook_url}")
 
 if __name__ == '__main__':
     set_webhook()
-    # Render provides PORT
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
