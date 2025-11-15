@@ -8,9 +8,9 @@ from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, Ca
 
 # --------------------- CONFIG ---------------------
 TOKEN = os.getenv("BOT_TOKEN")          # MUST be set in Render
-OWNER_ID = 8405313334                   # your Telegram ID
+OWNER_ID = 8405313334                   # (optional - not used for global update)
 USERS_FILE = "users.txt"
-WELCOME_FILE = "welcome.json"           # NEW: persistent welcome storage
+WELCOME_FILE = "welcome.json"           # stores global + per-user
 # --------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +21,8 @@ bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
 
 # ---------- persistent data ----------
-user_welcome = {}          # {user_id: {"text": str, "photo": file_id or None}}
+user_welcome = {}          # per-user (optional fallback)
+global_welcome = None      # {"text": str, "photo": file_id or None}
 lock = threading.Lock()
 
 
@@ -50,31 +51,35 @@ def forward_id(uid: int):
 
 
 def load_welcome():
-    """Load welcome dict from JSON file."""
-    global user_welcome
+    global user_welcome, global_welcome
     if os.path.exists(WELCOME_FILE):
         try:
             with open(WELCOME_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
-                # Convert old tuple format if exists
-                for uid, val in data.items():
-                    if isinstance(val, list):  # old format [text, photo]
-                        data[uid] = {"text": val[0], "photo": val[1]}
-                user_welcome = {int(k): v for k, v in data.items()}
-            logger.info("Welcome messages loaded.")
+                per_user = data.get("per_user", {})
+                for uid, val in per_user.items():
+                    if isinstance(val, list):
+                        per_user[uid] = {"text": val[0], "photo": val[1]}
+                user_welcome = {int(k): v for k, v in per_user.items()}
+                global_welcome = data.get("global")
+            logger.info("Welcome data loaded.")
         except Exception as e:
             logger.error(f"Failed to load welcome file: {e}")
     else:
         user_welcome = {}
+        global_welcome = None
 
 
 def save_welcome():
-    """Save welcome dict to JSON file."""
     with lock:
         try:
+            data = {
+                "per_user": user_welcome,
+                "global": global_welcome
+            }
             with open(WELCOME_FILE, 'w', encoding='utf-8') as f:
-                json.dump(user_welcome, f, ensure_ascii=False, indent=2)
-            logger.info("Welcome messages saved.")
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info("Welcome data saved.")
         except Exception as e:
             logger.error(f"Failed to save welcome file: {e}")
 
@@ -83,36 +88,43 @@ def save_welcome():
 load_welcome()
 
 
+# ---------- SEND WELCOME ----------
+def send_welcome(uid: int):
+    if global_welcome:
+        try:
+            if global_welcome.get("photo"):
+                bot.send_photo(chat_id=uid, photo=global_welcome["photo"], caption=global_welcome.get("text", ""))
+            else:
+                bot.send_message(chat_id=uid, text=global_welcome.get("text", "Welcome!"))
+        except Exception as e:
+            logger.warning(f"Global send failed for {uid}: {e}")
+            bot.send_message(chat_id=uid, text=global_welcome.get("text", "Welcome!"))
+        return
+
+    if uid in user_welcome:
+        data = user_welcome[uid]
+        try:
+            if data.get("photo"):
+                bot.send_photo(chat_id=uid, photo=data["photo"], caption=data.get("text", ""))
+            else:
+                bot.send_message(chat_id=uid, text=data.get("text", "Welcome!"))
+        except Exception as e:
+            logger.warning(f"Per-user send failed for {uid}: {e}")
+        return
+
+    bot.send_message(chat_id=uid, text="Welcome to the lusty vault \n join backup")
+
+
 # ---------- HANDLERS ----------
 def start(update: Update, context: CallbackContext):
     user = update.effective_user
     uid = user.id
     save_user(uid)
     forward_id(uid)
-
-    # Default welcome if not customized
-    if uid not in user_welcome:
-        default_text = "Welcome to the lusty vault \n join backup"
-        bot.send_message(chat_id=uid, text=default_text)
-        return
-
-    # Send saved custom welcome
-    data = user_welcome[uid]
-    text = data.get("text", "")
-    photo = data.get("photo")
-
-    try:
-        if photo:
-            bot.send_photo(chat_id=uid, photo=photo, caption=text)
-        else:
-            bot.send_message(chat_id=uid, text=text)
-    except Exception as e:
-        logger.warning(f"Failed to send welcome to {uid}: {e}")
-        bot.send_message(chat_id=uid, text=text or "Welcome!")
+    send_welcome(uid)
 
 
 def any_message(update: Update, context: CallbackContext):
-    """Auto-reply to any non-command message"""
     user = update.effective_user
     uid = user.id
     save_user(uid)
@@ -121,39 +133,41 @@ def any_message(update: Update, context: CallbackContext):
 
 
 def scarkibrownchoot(update: Update, context: CallbackContext):
-    """SET permanent welcome: reply to any message with /scarkibrownchoot"""
+    """ANYONE can set GLOBAL welcome by replying with /scarkibrownchoot"""
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("❗ Reply to a message (text/photo/doc) with /scarkibrownchoot")
+        update.message.reply_text("Reply to a message (text/photo) with /scarkibrownchoot to set global welcome.")
         return
-
-    uid = update.effective_user.id
 
     text = (msg.caption or msg.text or "").strip()
     photo = None
 
     if msg.photo:
         photo = msg.photo[-1].file_id
-    elif msg.document and msg.document.mime_type.startswith('image/'):
+    elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith('image/'):
         photo = msg.document.file_id
 
-    # Save permanently
-    user_welcome[uid] = {"text": text, "photo": photo}
+    global global_welcome
+    global_welcome = {"text": text, "photo": photo}
     save_welcome()
 
-    update.message.reply_text("✅ New welcome message saved permanently!")
+    # Optional: clear per-user welcomes so global is the only one
+    user_welcome.clear()
+    save_welcome()
+
+    update.message.reply_text("Global welcome updated! Everyone will now get this on /start.")
 
 
 def scarhellboykelaudepr(update: Update, context: CallbackContext):
-    """BROADCAST to all saved users"""
+    """BROADCAST to all users"""
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("❗ Reply to a message with /scarhellboykelaudepr to broadcast")
+        update.message.reply_text("Reply with /scarhellboykelaudepr to broadcast")
         return
 
     users = load_users()
     if not users:
-        update.message.reply_text("No users to broadcast to.")
+        update.message.reply_text("No users.")
         return
 
     text = (msg.caption or msg.text or "").strip()
@@ -161,7 +175,7 @@ def scarhellboykelaudepr(update: Update, context: CallbackContext):
 
     if msg.photo:
         photo = msg.photo[-1].file_id
-    elif msg.document and msg.document.mime_type.startswith('image/'):
+    elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith('image/'):
         photo = msg.document.file_id
 
     success = 0
@@ -173,14 +187,14 @@ def scarhellboykelaudepr(update: Update, context: CallbackContext):
                 bot.send_message(chat_id=uid, text=text or " ")
             success += 1
         except Exception as e:
-            logger.warning(f"Failed to send to {uid}: {e}")
+            logger.warning(f"Broadcast failed to {uid}: {e}")
 
-    update.message.reply_text(f"Broadcast sent to {success}/{len(users)} users.")
+    update.message.reply_text(f"Sent to {success}/{len(users)} users.")
 
 
-# ---------- REGISTER HANDLERS ----------
+# ---------- REGISTER ----------
 dispatcher.add_handler(CommandHandler("start", start))
-dispatcher.add_handler(CommandHandler("scarkibrownchoot", scarkibrownchoot))
+dispatcher.add_handler(CommandHandler("scarkibrownchoot", scarkibrownchoot))  # Now global
 dispatcher.add_handler(CommandHandler("scarhellboykelaudepr", scarhellboykelaudepr))
 dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
 
@@ -206,7 +220,7 @@ def set_webhook():
         bot.set_webhook(url=webhook_url)
         logger.info(f"Webhook set to {webhook_url}")
     else:
-        logger.info("Webhook already set.")
+        logger.info("Webhook already correct.")
 
 
 # ---------- RUN ----------
