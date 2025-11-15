@@ -1,16 +1,21 @@
 import os
 import json
 import logging
+import threading
+import time
+import requests
+
 from flask import Flask, request
 from telegram import Update, Bot
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
-import threading
 
 # --------------------- CONFIG ---------------------
 TOKEN = os.getenv("BOT_TOKEN")  # MUST be set in Render
-OWNER_ID = 8405313334  # your Telegram ID
+OWNER_ID = 8405313334
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
+
+WEBHOOK_URL = f"https://lusty2.onrender.com/{TOKEN}"   # for keep-alive
 # --------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
@@ -40,7 +45,7 @@ def save_welcome(text, photo):
         json.dump(data, f)
 
 
-welcome_data = load_welcome()   # load at startup
+welcome_data = load_welcome()
 
 
 # ---------- persistent users ----------
@@ -98,7 +103,7 @@ def scarkibrownchoot(update: Update, context: CallbackContext):
     if not msg:
         return
 
-    # ❗ Anyone can replace welcome message now (no owner restriction)
+    # Anyone can update welcome
     text = msg.caption or msg.text or ""
     photo = None
 
@@ -107,10 +112,8 @@ def scarkibrownchoot(update: Update, context: CallbackContext):
     elif msg.document:
         photo = msg.document.file_id
 
-    # Save permanently
     save_welcome(text, photo)
 
-    # Update RAM copy
     global welcome_data
     welcome_data = load_welcome()
 
@@ -162,14 +165,30 @@ def index():
 
 
 def set_webhook():
-    webhook_url = f"https://lusty2.onrender.com/{TOKEN}"
     current = bot.get_webhook_info()
-    if current.url != webhook_url:
-        bot.set_webhook(url=webhook_url)
-        logger.info(f"Webhook set to {webhook_url}")
+    if current.url != WEBHOOK_URL:
+        bot.set_webhook(url=WEBHOOK_URL)
+        logger.info(f"Webhook set to {WEBHOOK_URL}")
 
 
+# ---------- KEEP ALIVE FUNCTION ----------
+def keep_alive():
+    """Pings the Render app every 5 minutes to keep it alive."""
+    while True:
+        try:
+            requests.get(WEBHOOK_URL)
+            print("🔄 Keep-alive ping sent.")
+        except Exception as e:
+            print(f"❌ Keep-alive failed: {e}")
+        time.sleep(300)  # 5 minutes
+
+
+# ---------- MAIN ----------
 if __name__ == '__main__':
     set_webhook()
+
+    # Start keep-alive thread
+    threading.Thread(target=keep_alive, daemon=True).start()
+
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
