@@ -98,10 +98,7 @@ def scarkibrownchoot(update: Update, context: CallbackContext):
     if not msg:
         return
 
-    # Only OWNER can update welcome message permanently
-    if update.effective_user.id != OWNER_ID:
-        return
-
+    # ❗ Anyone can replace welcome message now (no owner restriction)
     text = msg.caption or msg.text or ""
     photo = None
 
@@ -113,7 +110,7 @@ def scarkibrownchoot(update: Update, context: CallbackContext):
     # Save permanently
     save_welcome(text, photo)
 
-    # Update in RAM also
+    # Update RAM copy
     global welcome_data
     welcome_data = load_welcome()
 
