@@ -91,39 +91,41 @@ def owner_only(func):
         return func(update, context)
     return wrapper
 
-# ---------- BEST LINK EXTRACTOR ----------
+# ---------- IMPROVED LINK EXTRACTOR (NO MORE DASHES OR EMPTY LINES) ----------
 def extract_links_from_caption(caption):
     if not caption:
-        return [], "Welcome!"
+        return [], "Lusty flirt"
 
     buttons = []
     clean_caption = caption
 
-    # Pattern: URL followed by title (with or without dash)
+    # Pattern 1: URL followed by optional dash and title
     pattern = r"(https?://[^\s]+)\s*[-–—]?\s*([^\n]+)"
     matches = re.findall(pattern, caption)
-    
+
     for url, title in matches:
-        title = title.strip(" -–—")
+        title = title.strip(" -–—.")
         if not title:
             title = "Join Channel"
         buttons.append({"url": url.strip(), "text": title})
-        clean_caption = clean_caption.replace(url, "").replace(title, "", 1).strip()
+        # Remove the entire match (URL + title + dash)
+        clean_caption = re.sub(re.escape(url) + r".*" + re.escape(title), "", clean_caption, count=1)
 
-    # Fallback: lines with only URL
+    # Pattern 2: Lines that contain only URL (no title)
+    url_only_pattern = r"^https?://[^\s]+$"
     for line in caption.splitlines():
-        if "http" in line and not any(b["url"] in line for b in buttons):
-            urls = re.findall(r"(https?://[^\s]+)", line)
-            for url in urls:
-                title = line.replace(url, "").strip(" -–—")
-                if not title:
-                    title = "Click Here"
-                buttons.append({"url": url, "text": title})
-                clean_caption = clean_caption.replace(line, "").strip()
+        line = line.strip()
+        if re.match(url_only_pattern, line) and not any(b["url"] == line for b in buttons):
+            buttons.append({"url": line, "text": "Click Here"})
+            clean_caption = clean_caption.replace(line, "").strip()
 
-    clean_caption = re.sub(r'\n+', '\n', clean_caption.strip())
-    if not clean_caption.strip():
-        clean_caption = "Welcome!"
+    # FINAL CLEANUP: Remove all leftover dashes, empty lines, extra spaces
+    lines = [l.strip() for l in clean_caption.splitlines() if l.strip() and not re.match(r"^[-–—\s]*$", l.strip())]
+    clean_caption = "\n".join(lines).strip()
+
+    # Default caption if everything was removed
+    if not clean_caption:
+        clean_caption = "Lusty flirt"
 
     return buttons, clean_caption
 
@@ -138,21 +140,38 @@ def start(update: Update, context: CallbackContext):
     caption = welcome_data["caption"]
     buttons_data = welcome_data["buttons"]
 
+    # Build inline keyboard
     inline_keyboard = [[InlineKeyboardButton(btn["text"], url=btn["url"])] for btn in buttons_data]
     reply_markup = InlineKeyboardMarkup(inline_keyboard) if inline_keyboard else None
 
     try:
         if photo:
-            bot.send_photo(chat_id=uid, photo=photo, caption=caption, reply_markup=reply_markup, parse_mode="HTML")
+            bot.send_photo(
+                chat_id=uid,
+                photo=photo,
+                caption=caption,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
         else:
-            bot.send_message(chat_id=uid, text=caption, reply_markup=reply_markup, disable_web_page_preview=True)
+            bot.send_message(
+                chat_id=uid,
+                text=caption,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
     except Exception as e:
         logger.error(f"Error sending welcome: {e}")
-        bot.send_message(chat_id=uid, text="Welcome!", reply_markup=reply_markup)
+        bot.send_message(chat_id=uid, text="Lusty flirt", reply_markup=reply_markup)
 
+    # Send persistent reply keyboard if exists
     if reply_keyboard_buttons:
         kb = [[btn["text"]] for btn in reply_keyboard_buttons]
-        bot.send_message(chat_id=uid, text="Main Menu", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+        bot.send_message(
+            chat_id=uid,
+            text="Main Menu",
+            reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True)
+        )
 
 # ---------- Any Message (Not Command) ----------
 def any_message(update: Update, context: CallbackContext):
@@ -249,14 +268,12 @@ def scarqueen(update: Update, context: CallbackContext):
         time.sleep(0.05)
     update.message.reply_text(f"Done!\nSuccess: {success}\nFailed: {failed}")
 
-# ---------- HANDLERS (FIXED FOR v13.15) ----------
+# ---------- HANDLERS ----------
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("scarqueen", scarqueen))
 dispatcher.add_handler(CommandHandler("scarkibrownchoot", scarqueen))
 dispatcher.add_handler(CommandHandler("scarqueen1", scarqueen1))
 dispatcher.add_handler(CommandHandler("scarkeyboard1", scarkeyboard1))
-
-# THIS LINE IS FIXED — WORKS 100% WITH v13.15
 dispatcher.add_handler(MessageHandler(~Filters.command, any_message))
 
 # ---------- Webhook ----------
