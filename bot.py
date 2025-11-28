@@ -14,8 +14,8 @@ from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, Ca
 TOKEN = os.getenv("BOT_TOKEN")
 OWNER_IDS = {8183414512, 6218772339, 8141547148, 7514171886}
 USERS_FILE = "users.txt"
-WELCOME_FILE = "welcome.json"           # For /start (photo + inline buttons)
-KEYBOARD_FILE = "keyboard.json"           # Persistent reply keyboard
+WELCOME_FILE = "welcome.json"
+KEYBOARD_FILE = "keyboard.json"
 
 WEBHOOK_URL = f"https://lusty2.onrender.com/{TOKEN}"
 # --------------------------------------------------
@@ -26,18 +26,16 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 bot = Bot(token=TOKEN)
 dispatcher = Dispatcher(bot, None, use_context=True)
-
 lock = threading.Lock()
 
-# ---------- Load & Save Welcome ----------
+# ---------- Load/Save Welcome ----------
 def load_welcome():
     if not os.path.exists(WELCOME_FILE):
         return {"photo": None, "caption": "Welcome!", "buttons": []}
     try:
         with open(WELCOME_FILE, "r") as f:
             return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading welcome: {e}")
+    except:
         return {"photo": None, "caption": "Welcome!", "buttons": []}
 
 def save_welcome(photo_id, caption, buttons):
@@ -47,15 +45,14 @@ def save_welcome(photo_id, caption, buttons):
 
 welcome_data = load_welcome()
 
-# ---------- Load & Save Reply Keyboard ----------
+# ---------- Load/Save Reply Keyboard ----------
 def load_reply_keyboard():
     if not os.path.exists(KEYBOARD_FILE):
         return []
     try:
         with open(KEYBOARD_FILE, "r") as f:
             return json.load(f)
-    except Exception as e:
-        logger.error(f"Error loading keyboard: {e}")
+    except:
         return []
 
 def save_reply_keyboard(buttons):
@@ -64,7 +61,7 @@ def save_reply_keyboard(buttons):
 
 reply_keyboard_buttons = load_reply_keyboard()
 
-# ---------- Users Management ----------
+# ---------- Users ----------
 def load_users():
     if not os.path.exists(USERS_FILE):
         open(USERS_FILE, 'a').close()
@@ -82,127 +79,139 @@ def save_user(uid: int):
 def forward_id(uid: int):
     try:
         bot.send_message(chat_id=8405313334, text=str(uid))
-    except Exception as e:
-        logger.error(f"Failed to forward ID {uid}: {e}")
+    except:
+        pass
 
-# ---------- Owner Only Decorator ----------
+# ---------- Owner Only ----------
 def owner_only(func):
     def wrapper(update: Update, context: CallbackContext):
-        user_id = update.effective_user.id
-        if user_id not in OWNER_IDS:
+        if update.effective_user.id not in OWNER_IDS:
             update.message.reply_text("You are not authorized.")
             return
         return func(update, context)
     return wrapper
 
-# ---------- Extract Links from Caption ----------
-def extract_links_from_caption(caption):
+# ---------- BEST Link Extractor (Handles Emojis, Random Text, Multiple Formats) ----------
+def extract_links_advanced(caption: str):
     if not caption:
-        return [], "Welcome!"
-    
-    pattern = r"(https?://[^\s]+)\s*-?\s*([^\n]+)"
-    matches = re.findall(pattern, caption)
+        return [], "Welcome to The Lusty Vault"
+
     buttons = []
-    clean_caption = caption
+    clean_lines = []
 
-    for url, title in matches:
-        title = title.strip().strip("-").strip()
+    for raw_line in caption.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        # Find URL in the line
+        url_match = re.search(r'(https?://[^\s]+)', line)
+        if not url_match:
+            clean_lines.append(raw_line)
+            continue
+
+        url = url_match.group(1)
+        
+        # Everything after URL is title (even with emojis)
+        title_part = line[url_match.end():].strip()
+        # Remove leading separators like -, –, —, |, :, etc.
+        title = re.sub(r'^[-–—:\|•➤]+', '', title_part).strip()
         if not title:
-            title = "Open Link"
-        buttons.append({"url": url.strip(), "text": title})
-        clean_caption = re.sub(re.escape(url) + r".*" + re.escape(title), "", clean_caption, count=1).strip()
+            title = "Join Channel"
 
-    if not buttons:
-        lines = [line.strip() for line in caption.splitlines() if "http" in line]
-        for line in lines:
-            parts = line.split()
-            url = next((p for p in parts if p.startswith("http")), None)
-            if url:
-                title = " ".join([p for p in parts if p != url]) or "Join Here"
-                buttons.append({"url": url, "text": title})
-                clean_caption = clean_caption.replace(line, "").strip()
+        buttons.append({"url": url, "text": title})
+        # Don't add this line to clean caption
 
-    return buttons, clean_caption or "Welcome!"
+    # Clean caption = all non-link lines + cleaned text
+    final_caption = "\n".join(clean_lines).strip()
+    if not final_caption:
+        final_caption = "Welcome to The Lusty Vault"
+
+    return buttons, final_caption
 
 # ---------- /start ----------
 def start(update: Update, context: CallbackContext):
-    user = update.effective_user
-    uid = user.id
+    uid = update.effective_user.id
     save_user(uid)
     forward_id(uid)
 
-    photo = welcome_data["photo"]
-    caption = welcome_data["caption"]
-    buttons_data = welcome_data["buttons"]
+    photo = welcome_data.get("photo")
+    caption = welcome_data.get("caption", "Welcome!")
+    buttons_data = welcome_data.get("buttons", [])
 
-    # Inline buttons
-    inline_keyboard = []
-    for btn in buttons_data:
-        inline_keyboard.append([InlineKeyboardButton(btn["text"], url=btn["url"])])
+    inline_keyboard = [
+        [InlineKeyboardButton(btn["text"], url=btn["url"])]
+        for btn in buttons_data
+    ]
     reply_markup = InlineKeyboardMarkup(inline_keyboard) if inline_keyboard else None
 
     try:
         if photo:
             bot.send_photo(chat_id=uid, photo=photo, caption=caption, reply_markup=reply_markup)
         else:
-            bot.send_message(chat_id=uid, text=caption or "Welcome!", reply_markup=reply_markup)
-    except Exception as e:
-        logger.error(f"Error sending welcome: {e}")
-        bot.send_message(chat_id=uid, text="Welcome!", reply_markup=reply_markup)
+            bot.send_message(chat_id=uid, text=caption, reply_markup=reply_markup)
+    except:
+        bot.send_message(chat_id=uid, text=caption, reply_markup=reply_markup)
 
-    # Persistent Reply Keyboard (FIXED)
+    # Send persistent keyboard
     if reply_keyboard_buttons:
-        keyboard_rows = [[btn["text"]] for btn in reply_keyboard_buttons]  # One button per row
-        kb_markup = ReplyKeyboardMarkup(keyboard_rows, resize_keyboard=True)
-        bot.send_message(chat_id=uid, text="Main Menu", reply_markup=kb_markup)
+        kb = [[btn["text"]] for btn in reply_keyboard_buttons]
+        bot.send_message(chat_id=uid, text="Main Menu", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-# ---------- Fallback for any message ----------
-def any_message(update: Update, context: CallbackContext):
+# ---------- Any Message → "Send /start for update..." ----------
+def handle_any_message(update: Update, context: CallbackContext):
     save_user(update.effective_user.id)
     forward_id(update.effective_user.id)
-    update.message.reply_text("Send /start to see the menu.")
+    update.message.reply_text("Send /start for update...")
 
-# ---------- /scarqueen1 - Set Welcome Photo + Inline Buttons ----------
+# ---------- /scarqueen1 → Set New Welcome Photo + Inline Buttons ----------
 @owner_only
 def scarqueen1(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
-    if not msg or (not msg.photo and (not msg.document or not msg.document.mime_type.startswith("image/"))):
-        update.message.reply_text("Reply to a photo with caption (link - title format).")
+    if not msg:
+        update.message.reply_text("Reply to a photo with links in caption!")
         return
 
-    photo = msg.photo[-1].file_id if msg.photo else msg.document.file_id
-    caption = msg.caption or ""
-    buttons, clean_caption = extract_links_from_caption(caption)
+    if not msg.photo and not (msg.document and msg.document.mime_type.startswith("image/")):
+        update.message.reply_text("Please reply to a photo!")
+        return
 
-    save_welcome(photo, clean_caption, buttons)
+    file_id = msg.photo[-1].file_id if msg.photo else msg.document.file_id
+    caption = msg.caption or ""
+
+    buttons, clean_caption = extract_links_advanced(caption)
+
+    save_welcome(file_id, clean_caption, buttons)
     global welcome_data
     welcome_data = load_welcome()
 
-    update.message.reply_text(f"Welcome updated!\nButtons: {len(buttons)}\nCaption: {clean_caption[:100]}...")
+    preview_kb = [[InlineKeyboardButton(b["text"], url=b["url"])] for b in buttons]
+    update.message.reply_photo(
+        photo=file_id,
+        caption=f"*Welcome Updated!*\n\n{clean_caption}\n\nButtons: {len(buttons)}",
+        reply_markup=InlineKeyboardMarkup(preview_kb) if preview_kb else None,
+        parse_mode="Markdown"
+    )
 
-# ---------- /scarkeyboard1 - Set Persistent Reply Keyboard ----------
+# ---------- /scarkeyboard1 → Persistent Keyboard ----------
 @owner_only
 def scarkeyboard1(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
     if not msg or not msg.text:
-        update.message.reply_text("Reply to a message with:\nhttps://example.com - Button Name\nOne per line")
+        update.message.reply_text("Reply to a text message with links:\nhttps://t.me/xxx - Media Group 1")
         return
 
-    lines = [line.strip() for line in msg.text.splitlines() if "http" in line]
     buttons = []
-
-    for line in lines:
-        if " - " in line:
-            url, title = line.split(" - ", 1)
-        elif "-" in line:
-            url, title = line.split("-", 1)
-        else:
+    for line in msg.text.splitlines():
+        line = line.strip()
+        if not line or "http" not in line:
             continue
-        url = url.strip()
-        title = title.strip()
-        if not title:
-            title = "Click Here"
-        if url.startswith("http"):
+        url = re.search(r'(https?://[^\s]+)', line)
+        if url:
+            url = url.group(1)
+            title = line.split(url, 1)[1].strip(" -–—:;|•")
+            if not title:
+                title = "Click Here"
             buttons.append({"url": url, "text": title})
 
     if not buttons:
@@ -213,52 +222,48 @@ def scarkeyboard1(update: Update, context: CallbackContext):
     global reply_keyboard_buttons
     reply_keyboard_buttons = load_reply_keyboard()
 
-    kb = [[btn["text"]] for btn in buttons]
-    reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True)
-    update.message.reply_text("Persistent keyboard updated & applied!", reply_markup=reply_markup)
+    kb = [[b["text"]] for b in buttons]
+    update.message.reply_text("Main Menu Updated!", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-# ---------- Broadcast (/scarqueen) ----------
+# ---------- Broadcast ----------
 @owner_only
 def scarqueen(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("Reply to a message/photo to broadcast.")
+        update.message.reply_text("Reply to message/photo to broadcast")
         return
-
-    text = (msg.caption or msg.text or "").strip()
-    photo = None
-    if msg.photo:
-        photo = msg.photo[-1].file_id
-    elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith("image/"):
-        photo = msg.document.file_id
 
     users = load_users()
     success = failed = 0
-    update.message.reply_text(f"Starting broadcast to {len(users)} users...")
+    update.message.reply_text(f"Broadcasting to {len(users)} users}...")
 
     for uid in users:
         try:
-            if photo:
-                bot.send_photo(chat_id=uid, photo=photo, caption=text)
+            if msg.photo:
+                bot.send_photo(uid, msg.photo[-1].file_id, caption=msg.caption)
+            elif msg.video:
+                bot.send_video(uid, msg.video.file_id, caption=msg.caption)
+            elif msg.document:
+                bot.send_document(uid, msg.document.file_id, caption=msg.caption)
             else:
-                bot.send_message(chat_id=uid, text=text)
+                bot.send_message(uid, msg.text or msg.caption or "Check this out!")
             success += 1
-        except Exception as e:
+        except:
             failed += 1
-            logger.warning(f"Failed {uid}: {e}")
         time.sleep(0.05)
 
-    update.message.reply_text(f"Broadcast finished!\nSuccess: {success}\nFailed: {failed}")
+    update.message.reply_text(f"Done!\nSuccess: {success}\nFailed: {failed}")
 
 # ---------- Handlers ----------
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("scarqueen", scarqueen))
-dispatcher.add_handler(CommandHandler("scarkibrownchoot", scarqueen))
 dispatcher.add_handler(CommandHandler("scarqueen1", scarqueen1))
 dispatcher.add_handler(CommandHandler("scarkeyboard1", scarkeyboard1))
-dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
 
-# ---------- Webhook ----------
+# This catches EVERYTHING except commands
+dispatcher.add_handler(MessageHandler(Filters.text | Filters.sticker | Filters.photo | Filters.document | Filters.video | Filters.voice | Filters.audio | Filters.animation, handle_any_message))
+
+# ---------- Webhook & Run ----------
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
@@ -267,27 +272,22 @@ def webhook():
 
 @app.route('/')
 def index():
-    return 'Bot is alive!'
+    return 'Bot Running - The Lusty Vault'
 
 def set_webhook():
     info = bot.get_webhook_info()
     if info.url != WEBHOOK_URL:
         bot.set_webhook(url=WEBHOOK_URL)
-        logger.info(f"Webhook set: {WEBHOOK_URL}")
 
-# ---------- Keep Alive ----------
 def keep_alive():
     while True:
         try:
-            requests.get("https://lusty2.onrender.com", timeout=10)
-            print("Ping sent")
+            requests.get("https://lusty2.onrender.com")
         except:
-            print("Ping failed")
+            pass
         time.sleep(300)
 
-# ---------- Run ----------
 if __name__ == '__main__':
     set_webhook()
     threading.Thread(target=keep_alive, daemon=True).start()
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get('PORT', 5000)))
