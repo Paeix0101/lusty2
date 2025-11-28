@@ -7,8 +7,8 @@ import requests
 import re
 
 from flask import Flask, request
-from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton
-from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext, CallbackQueryHandler
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
+from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # --------------------- CONFIG ---------------------
 TOKEN = os.getenv("BOT_TOKEN")
@@ -17,7 +17,6 @@ OWNER_IDS = {8183414512, 6218772339, 8141547148, 7514171886}
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
 KEYBOARD_FILE = "keyboard.json"
-CHANNELS_FILE = "channels.json"   # Force join channels
 
 WEBHOOK_URL = f"https://lusty2.onrender.com/{TOKEN}"
 # --------------------------------------------------
@@ -31,28 +30,43 @@ dispatcher = Dispatcher(bot, None, use_context=True)
 
 lock = threading.Lock()
 
-# ---------- Load/Save Functions ----------
-def load_json(file, default):
-    if not os.path.exists(file):
-        return default
+# ---------- Load & Save Welcome ----------
+def load_welcome():
+    if not os.path.exists(WELCOME_FILE):
+        return {"photo": None, "caption": "Welcome!", "buttons": []}
     try:
-        with open(file, "r") as f:
+        with open(WELCOME_FILE, "r") as f:
             return json.load(f)
     except:
-        return default
+        return {"photo": None, "caption": "Welcome!", "buttons": []}
 
-def save_json(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f, indent=2)
+def save_welcome(photo_id, caption, buttons):
+    data = {"photo": photo_id, "caption": caption, "buttons": buttons}
+    with open(WELCOME_FILE, "w") as f:
+        json.dump(data, f)
 
-# Load data
-welcome_data = load_json(WELCOME_FILE, {"photo": None, "caption": "Welcome!", "buttons": []})
-reply_keyboard_buttons = load_json(KEYBOARD_FILE, [])
-force_channels = load_json(CHANNELS_FILE, [])  # List of {"id": -1001234567890, "link": "https://t.me/channel"}
+welcome_data = load_welcome()
 
-# ---------- Users ----------
+# ---------- Load & Save Reply Keyboard ----------
+def load_reply_keyboard():
+    if not os.path.exists(KEYBOARD_FILE):
+        return []
+    try:
+        with open(KEYBOARD_FILE, "r") as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_reply_keyboard(buttons):
+    with open(KEYBOARD_FILE, "w") as f:
+        json.dump(buttons, f)
+
+reply_keyboard_buttons = load_reply_keyboard()
+
+# ---------- Users System ----------
 def load_users():
     if not os.path.exists(USERS_FILE):
+        open(USERS_FILE, 'a').close()
         return set()
     with open(USERS_FILE, 'r') as f:
         return {int(line.strip()) for line in f if line.strip()}
@@ -73,226 +87,166 @@ def forward_id(uid: int):
 # ---------- Owner Only ----------
 def owner_only(func):
     def wrapper(update: Update, context: CallbackContext):
-        if update.effective_user.id not in OWNER_IDS:
-            update.message.reply_text("You are not authorized.")
+        user_id = update.effective_user.id
+        if user_id not in OWNER_IDS:
+            update.message.reply_text("❌ You are not authorized.")
             return
         return func(update, context)
     return wrapper
 
-# ---------- Check if User Joined All Channels ----------
-async def check_subscription(user_id):
-    if not force_channels:
-        return True
-    for channel in force_channels:
-        try:
-            member = await bot.get_chat_member(chat_id=channel["id"], user_id=user_id)
-            if member.status not in ["member", "administrator", "creator"]:
-                return False
-        except:
-            return False
-    return True
-
-# ---------- Extract Links from Caption ----------
+# ---------- Extract links ----------
 def extract_links_from_caption(caption):
     if not caption:
         return [], "Welcome!"
-    pattern = r"(https?://[^\s]+)\s*-?\s*([^\n\r]+)"
+
+    pattern = r"(https?://[^\s]+)\s*-?\s*([^\n]+)"
     matches = re.findall(pattern, caption)
+
     buttons = []
-    clean_caption = caption
+    clean_caption = caption.strip()
 
     for url, title in matches:
-        title = title.strip(" -")
+        title = title.strip().strip("-").strip()
         if not title:
             title = "Open Link"
+
         buttons.append({"url": url.strip(), "text": title})
-        clean_caption = re.sub(re.escape(url) + r".*" + re.escape(title), "", clean_caption).strip()
+        clean_caption = clean_caption.replace(f"{url} - {title}", "").replace(f"{url}", "").strip()
 
-    if not buttons:
-        lines = [l.strip() for l in caption.splitlines() if "http" in l]
-        for line in lines:
-            parts = line.split()
-            url = next((p for p in parts if p.startswith("http")), None)
-            if url:
-                title = " ".join([p for p in parts if p != url]) or "Join Here"
-                buttons.append({"url": url, "text": title})
-                clean_caption = clean_caption.replace(line, "").strip()
+    if not clean_caption:
+        clean_caption = "Welcome!"
 
-    return buttons, clean_caption or "Welcome!"
+    return buttons, clean_caption
+
 
 # ---------- /start ----------
-async def start(update: Update, context: CallbackContext):
+def start(update: Update, context: CallbackContext):
     user = update.effective_user
     uid = user.id
     save_user(uid)
     forward_id(uid)
 
-    is_subscribed = await check_subscription(uid)
-
-    if not is_subscribed:
-        keyboard = []
-        for ch in force_channels:
-            keyboard.append([InlineKeyboardButton(f"Join {ch.get('name', 'Channel')}", url=ch["link"])])
-        keyboard.append([InlineKeyboardButton("I Joined – Refresh", callback_data="check_join")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(
-            "Please join our channels first to unlock the bot!",
-            reply_markup=reply_markup
-        )
-        return
-
-    # User is subscribed → show main menu
     photo = welcome_data["photo"]
     caption = welcome_data["caption"]
     buttons_data = welcome_data["buttons"]
 
-    inline_keyboard = [
-        [InlineKeyboardButton(btn["text"], url=btn["url"]) for btn in row]
-        for row in [buttons_data[i:i+2] for i in range(0, len(buttons_data), 2)]
-    ]
-    reply_markup = InlineKeyboardMarkup(inline_keyboard) if inline_keyboard else None
+    keyboard = [[InlineKeyboardButton(btn["text"], url=btn["url"])] for btn in buttons_data]
+    inline_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
 
     try:
         if photo:
-            await bot.send_photo(chat_id=uid, photo=photo, caption=caption, reply_markup=reply_markup)
+            bot.send_photo(uid, photo=photo, caption=caption, reply_markup=inline_markup)
         else:
-            await bot.send_message(chat_id=uid, text=caption or "Welcome!", reply_markup=reply_markup)
+            bot.send_message(uid, text=caption, reply_markup=inline_markup)
     except:
-        await bot.send_message(chat_id=uid, text=caption or "Welcome!", reply_markup=reply_markup)
+        bot.send_message(uid, text=caption, reply_markup=inline_markup)
 
-    # Persistent keyboard
     if reply_keyboard_buttons:
-        kb = [[KeyboardButton(btn["text"])] for btn in reply_keyboard_buttons]
-        await bot.send_message(chat_id=uid, text="Your Menu:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+        kb = [[btn["text"] for btn in reply_keyboard_buttons]]
+        reply_markup = ReplyKeyboardMarkup(kb, resize_keyboard=True)
+        bot.send_message(uid, text="Your menu:", reply_markup=reply_markup)
 
-# ---------- Refresh Button ----------
-async def check_join_callback(update: Update, context: CallbackContext):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    if await check_subscription(user_id):
-        await query.edit_message_text("Access Granted! Sending menu...")
-        await start(update, context)  # Reuse start logic
-    else:
-        await query.edit_message_text("You haven't joined all channels yet!")
+# ---------- Any Message ----------
+def any_message(update: Update, context: CallbackContext):
+    user = update.effective_user
+    save_user(user.id)
+    forward_id(user.id)
+    update.message.reply_text("Send /start to see the menu again.")
 
-# ---------- /scarqueen1 - Set Welcome + Inline Buttons ----------
+# ---------- /scarqueen1 (Welcome Update) ----------
 @owner_only
-async def scarqueen1(update: Update, context: CallbackContext):
+def scarqueen1(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
-    if not msg or not msg.photo:
-        update.message.reply_text("Reply to a photo with caption:\nhttps://link - Button Name")
+    if not msg:
+        update.message.reply_text("Reply to a photo with caption containing:\n\nlink - title")
         return
 
-    photo = msg.photo[-1].file_id
+    photo = None
+    if msg.photo:
+        photo = msg.photo[-1].file_id
+    elif msg.document and msg.document.mime_type.startswith("image/"):
+        photo = msg.document.file_id
+    else:
+        update.message.reply_text("❌ Reply to a valid photo.")
+        return
+
     caption = msg.caption or ""
     buttons, clean_caption = extract_links_from_caption(caption)
 
-    save_json(WELCOME_FILE, {"photo": photo, "caption": clean_caption, "buttons": buttons})
+    save_welcome(photo, clean_caption, buttons)
     global welcome_data
-    welcome_data = load_json(WELCOME_FILE, welcome_data)
+    welcome_data = load_welcome()
 
-    update.message.reply_text(f"Welcome Updated!\nButtons: {len(buttons)}")
+    update.message.reply_text(f"✅ Welcome updated!\nButtons: {len(buttons)}")
 
-# ---------- /scarkeyboard1 - Set Bottom Keyboard ----------
+# ---------- /scarkeyboard1 (Reply Keyboard) ----------
 @owner_only
-async def scarkeyboard1(update: Update, context: CallbackContext):
+def scarkeyboard1(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
     if not msg or not msg.text:
-        update.message.reply_text("Reply to text:\nhttps://link.com - Button Name")
+        update.message.reply_text("Reply to a text message:\nlink - title")
         return
 
-    lines = [l.strip() for l in msg.text.splitlines() if "http" in l or "-" in l]
     buttons = []
-    for line in lines:
-        if " - " in line:
-            url, title = line.split(" - ", 1)
-        elif "-" in line:
-            url, title = line.split("-", 1)
-        else:
+    for line in msg.text.split("\n"):
+        if "-" not in line:
             continue
+
+        url, title = line.split("-", 1)
         url = url.strip()
-        title = title.strip() or "Link"
+        title = title.strip()
+
         if url.startswith("http"):
             buttons.append({"url": url, "text": title})
 
     if not buttons:
-        update.message.reply_text("No valid links found!")
+        update.message.reply_text("❌ No valid line found!")
         return
 
-    save_json(KEYBOARD_FILE, buttons)
+    save_reply_keyboard(buttons)
     global reply_keyboard_buttons
-    reply_keyboard_buttons = buttons
+    reply_keyboard_buttons = load_reply_keyboard()
 
-    kb = [[KeyboardButton(b["text"])] for b in buttons]
-    update.message.reply_text("Keyboard Updated!", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
-
-# ---------- /setchannels - Set Force Join Channels ----------
-@owner_only
-async def setchannels(update: Update, context: CallbackContext):
-    if not context.args:
-        update.message.reply_text("Usage: /setchannels @channel1 @channel2")
-        return
-
-    channels = []
-    for username in context.args:
-        username = username.replace("https://t.me/", "").replace("@", "")
-        try:
-            chat = await bot.get_chat("@" + username)
-            channels.append({
-                "id": chat.id,
-                "link": f"https://t.me/{username}",
-                "name": chat.title
-            })
-        except:
-            update.message.reply_text(f"Failed to add {username}")
-            continue
-
-    save_json(CHANNELS_FILE, channels)
-    global force_channels
-    force_channels = channels
-
-    text = "Force Join Channels Updated:\n" + "\n".join([f"• {c['name']}" for c in channels])
-    update.message.reply_text(text)
+    markup = ReplyKeyboardMarkup([[b["text"] for b in buttons]], resize_keyboard=True)
+    update.message.reply_text("✅ Keyboard updated!", reply_markup=markup)
 
 # ---------- Broadcast ----------
 @owner_only
-async def scarqueen(update: Update, context: CallbackContext):
+def scarqueen(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("Reply to a message/photo!")
+        update.message.reply_text("Reply to a photo/text to broadcast")
         return
+
+    text = (msg.caption or msg.text or "").strip()
+    photo = msg.photo[-1].file_id if msg.photo else None
 
     users = load_users()
     success = failed = 0
-    text = msg.caption or msg.text or ""
-    photo = msg.photo[-1].file_id if msg.photo else None
 
     update.message.reply_text(f"Broadcasting to {len(users)} users...")
 
     for uid in users:
         try:
             if photo:
-                await bot.send_photo(uid, photo, caption=text)
+                bot.send_photo(uid, photo=photo, caption=text)
             else:
-                await bot.send_message(uid, text)
+                bot.send_message(uid, text=text)
             success += 1
         except:
             failed += 1
         time.sleep(0.05)
 
-    update.message.reply_text(f"Broadcast Done!\nSuccess: {success}\nFailed: {failed}")
+    update.message.reply_text(f"Done!\nSuccess: {success}\nFailed: {failed}")
 
-# ---------- Handlers ----------
-dispatcher.add_handler(CommandHandler("start", start, run_async=True))
-dispatcher.add_handler(CallbackQueryHandler(check_join_callback, pattern="check_join"))
-dispatcher.add_handler(CommandHandler("scarqueen1", scarqueen1, run_async=True))
-dispatcher.add_handler(CommandHandler("scarkeyboard1", scarkeyboard1, run_async=True))
-dispatcher.add_handler(CommandHandler("setchannels", setchannels, run_async=True))
-dispatcher.add_handler(CommandHandler("scarqueen", scarqueen, run_async=True))
-dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, lambda u, c: u.message.reply_text("Send /start")))
+# ---------- Register Handlers ----------
+dispatcher.add_handler(CommandHandler("start", start))
+dispatcher.add_handler(CommandHandler("scarqueen", scarqueen))
+dispatcher.add_handler(CommandHandler("scarqueen1", scarqueen1))
+dispatcher.add_handler(CommandHandler("scarkeyboard1", scarkeyboard1))
+dispatcher.add_handler(MessageHandler(Filters.all & ~Filters.command, any_message))
 
-# ---------- Webhook & Keep Alive ----------
+# ---------- Webhook ----------
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
@@ -301,14 +255,15 @@ def webhook():
 
 @app.route('/')
 def index():
-    return 'Bot is running!'
+    return "Bot is alive!"
 
 def set_webhook():
-    info = bot.get_webhook_info()
-    if info.url != WEBHOOK_URL:
+    current = bot.get_webhook_info()
+    if current.url != WEBHOOK_URL:
         bot.set_webhook(url=WEBHOOK_URL)
-        logger.info("Webhook set!")
+        logger.info("Webhook Updated!")
 
+# ---------- Keep Alive Ping ----------
 def keep_alive():
     while True:
         try:
@@ -317,6 +272,7 @@ def keep_alive():
             pass
         time.sleep(300)
 
+# ---------- Main ----------
 if __name__ == '__main__':
     set_webhook()
     threading.Thread(target=keep_alive, daemon=True).start()
