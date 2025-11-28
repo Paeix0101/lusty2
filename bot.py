@@ -6,7 +6,7 @@ import time
 import requests
 import re
 from flask import Flask, request
-from telegram import Update, Bot, ReplyKeyboardMarkup
+from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, MessageHandler, Filters, CallbackContext
 
 # --------------------- CONFIG ---------------------
@@ -14,7 +14,7 @@ TOKEN = os.getenv("BOT_TOKEN")
 OWNER_IDS = {8183414512, 6218772339, 8141547148, 7514171886}
 USERS_FILE = "users.txt"
 WELCOME_FILE = "welcome.json"
-KEYBOARD_FILE = "keyboard.json"  # Stores list of buttons with full content
+KEYBOARD_FILE = "keyboard.json"
 WEBHOOK_URL = f"https://lusty2.onrender.com/{TOKEN}"
 
 # --------------------------------------------------
@@ -45,7 +45,7 @@ def forward_id(uid: int):
     except:
         pass
 
-# ---------- Load/Save Welcome ----------
+# ---------- Welcome Data ----------
 def load_welcome():
     if not os.path.exists(WELCOME_FILE):
         return {"photo": None, "caption": "Lusty flirt", "buttons": []}
@@ -62,7 +62,7 @@ def save_welcome(photo_id, caption, buttons):
 
 welcome_data = load_welcome()
 
-# ---------- Load/Save Keyboard Buttons (Full Content) ----------
+# ---------- Keyboard Buttons (Persistent) ----------
 def load_keyboard():
     if not os.path.exists(KEYBOARD_FILE):
         return []
@@ -76,9 +76,9 @@ def save_keyboard(items):
     with open(KEYBOARD_FILE, "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False, indent=2)
 
-keyboard_items = load_keyboard()  # List of dicts: {"title": "...", "content": {...}}
+keyboard_items = load_keyboard()
 
-# ---------- Owner Only ----------
+# ---------- Owner Only Decorator ----------
 def owner_only(func):
     def wrapper(update: Update, context: CallbackContext):
         if update.effective_user.id not in OWNER_IDS:
@@ -87,32 +87,28 @@ def owner_only(func):
         return func(update, context)
     return wrapper
 
-# ---------- Extract Button from Message ----------
-def extract_button_from_message(message):
-    text = (message.caption or message.text or "").strip()
-    if not text:
-        return None, None
+# ---------- Extract Links & Titles from Caption ----------
+def extract_buttons_from_caption(caption: str):
+    if not caption:
+        return [], caption
 
-    # Find first valid line with URL - Title
-    match = re.search(r"(https?://[^\s]+)\s*[-–—]?\s*([^\n]+)", text)
-    if not match:
-        return None, None
+    buttons = []
+    # Match: http... - Title OR http... Title (with optional dash/spaces)
+    matches = re.findall(r"(https?://[^\s]+)\s*[-–—]?\s*([^\n]+)", caption)
+    
+    for url, title in matches:
+        title = title.strip(" -–—.")  # clean junk
+        if title and url.strip():
+            buttons.append({"text": title, "url": url.strip()})
 
-    url = match.group(1).strip()
-    title = match.group(2).strip()
-    if not title:
-        title = "Click Here"
+    # Remove all link lines from caption
+    clean_caption = re.sub(r"https?://[^\s]+\s*[-–—]?\s*[^\n]*\n?", "", caption)
+    clean_caption = re.sub(r"\n+", "\n", clean_caption.strip())
+    
+    if not clean_caption.strip():
+        clean_caption = "Lusty flirt"
 
-    # Save full content
-    content = {
-        "text": message.text,
-        "photo": message.photo[-1].file_id if message.photo else None,
-        "document": message.document.file_id if message.document else None,
-        "video": message.video.file_id if message.video else None,
-        "caption": message.caption
-    }
-
-    return {"title": title, "url": url, "content": content}, title
+    return buttons, clean_caption
 
 # ---------- /start ----------
 def start(update: Update, context: CallbackContext):
@@ -120,30 +116,42 @@ def start(update: Update, context: CallbackContext):
     save_user(uid)
     forward_id(uid)
 
-    # Send Welcome
     photo = welcome_data.get("photo")
     caption = welcome_data.get("caption", "Lusty flirt")
     buttons = welcome_data.get("buttons", [])
 
-    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-    inline_kb = [[InlineKeyboardButton(b["text"], url=b["url"])] for b in buttons]
-    inline_markup = InlineKeyboardMarkup(inline_kb) if inline_kb else None
+    inline_keyboard = [
+        [InlineKeyboardButton(btn["text"], url=btn["url"])] for btn in buttons
+    ]
+    reply_markup = InlineKeyboardMarkup(inline_keyboard) if inline_keyboard else None
 
     try:
         if photo:
-            bot.send_photo(uid, photo, caption=caption, reply_markup=inline_markup, parse_mode="HTML")
+            bot.send_photo(
+                chat_id=uid,
+                photo=photo,
+                caption=caption,
+                parse_mode="HTML",
+                reply_markup=reply_markup
+            )
         else:
-            bot.send_message(uid, text=caption, reply_markup=inline_markup, disable_web_page_preview=True)
-    except:
+            bot.send_message(
+                chat_id=uid,
+                text=caption,
+                reply_markup=reply_markup,
+                disable_web_page_preview=True
+            )
+    except Exception as e:
+        logger.error(f"Error sending welcome: {e}")
         bot.send_message(uid, "Lusty flirt")
 
-    # Send Keyboard
+    # Send persistent keyboard if exists
     if keyboard_items:
         kb = [[item["title"]] for item in keyboard_items]
-        bot.send_message(uid, "Choose:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
+        bot.send_message(uid, "Choose one:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
 
-# ---------- Handle Button Click ----------
-def handle_button_click(update: Update, context: CallbackContext):
+# ---------- Handle Persistent Keyboard Clicks ----------
+def handle_keyboard_click(update: Update, context: CallbackContext):
     text = update.message.text.strip()
     uid = update.effective_user.id
     save_user(uid)
@@ -152,66 +160,77 @@ def handle_button_click(update: Update, context: CallbackContext):
         if item["title"] == text:
             content = item["content"]
             try:
-                if content["photo"]:
-                    bot.send_photo(uid, content["photo"], caption=content.get("caption") or content.get("text"), parse_mode="HTML")
-                elif content["video"]:
+                if content.get("photo"):
+                    bot.send_photo(uid, content["photo"], caption=content.get("caption") or "", parse_mode="HTML")
+                elif content.get("video"):
                     bot.send_video(uid, content["video"], caption=content.get("caption"))
-                elif content["document"]:
+                elif content.get("document"):
                     bot.send_document(uid, content["document"], caption=content.get("caption"))
-                elif content["text"]:
-                    bot.send_message(uid, content["text"], disable_web_page_preview=True)
-            except Exception as e:
+                elif content.get("text"):
+                    bot.send_message(uid, content["text"], disable_web_page_preview=True, parse_mode="HTML")
+            except:
                 bot.send_message(uid, "Content expired or error.")
             return
 
-# ---------- Dynamic Add Button: /scarkeyboard1, /scarkeyboard2, ... ----------
-def create_add_button_handler(position):
-    @owner_only
-    def add_button(update: Update, context: CallbackContext):
-        global keyboard_items
-        msg = update.message.reply_to_message
-        if not msg:
-            update.message.reply_text(f"Reply to a message/photo with link and title!\nExample:\nhttps://t.me/xxx - Premium Vault {position}")
-            return
+# ---------- /scarqueen1 - Update Welcome Photo + Inline Buttons ----------
+@owner_only
+def scarqueen1(update: Update, context: CallbackContext):
+    msg = update.message.reply_to_message
 
-        button_data, title = extract_button_from_message(msg)
-        if not button_data:
-            update.message.reply_text("No valid link-title found! Use: https://link - Title")
-            return
+    if not msg or (not msg.photo and not msg.document and not msg.text):
+        update.message.reply_text("Reply to a photo/video/document/text with caption containing links!")
+        return
 
-        # Remove old button at this position if exists
-        if len(keyboard_items) >= position:
-            old_title = keyboard_items[position-1]["title"]
-            keyboard_items[position-1] = button_data
-            action = f"Updated button {position}: {title}"
+    # Get media file_id
+    photo_id = None
+    if msg.photo:
+        photo_id = msg.photo[-1].file_id
+    elif msg.document:
+        photo_id = msg.document.file_id
+    elif msg.video:
+        photo_id = msg.video.file_id
+
+    caption = msg.caption or msg.text or "Lusty flirt"
+
+    # Extract inline buttons and clean caption
+    buttons, clean_caption = extract_buttons_from_caption(caption)
+
+    save_welcome(photo_id, clean_caption, buttons)
+    global welcome_data
+    welcome_data = load_welcome()
+
+    # Confirm with preview
+    preview_kb = [[InlineKeyboardButton(b["text"], url=b["url"])] for b in buttons]
+    try:
+        if photo_id:
+            bot.send_photo(
+                update.effective_user.id,
+                photo_id,
+                caption=f"Welcome Updated!\n\n{clean_caption}",
+                reply_markup=InlineKeyboardMarkup(preview_kb) if preview_kb else None,
+                parse_mode="HTML"
+            )
         else:
-            keyboard_items.append(button_data)
-            action = f"Added button {position}: {title}"
-
-        save_keyboard(keyboard_items)
-
-        titles = "\n".join([f"{i+1}. {item['title']}" for i, item in enumerate(keyboard_items)])
-        update.message.reply_text(
-            f"{action}\n\nCurrent Keyboard:\n{titles}",
-            reply_markup=ReplyKeyboardMarkup([[item["title"]] for item in keyboard_items], resize_keyboard=True)
-        )
-    return add_button
-
-# Register /scarkeyboard1 to /scarkeyboard10 (you can increase if needed)
-for i in range(1, 11):
-    dispatcher.add_handler(CommandHandler(f"scarkeyboard{i}", create_add_button_handler(i)))
+            bot.send_message(
+                update.effective_user.id,
+                f"Welcome Updated!\n\n{clean_caption}",
+                reply_markup=InlineKeyboardMarkup(preview_kb) if preview_kb else None
+            )
+    except:
+        update.message.reply_text("Welcome updated successfully!")
 
 # ---------- Broadcast ----------
 @owner_only
 def broadcast(update: Update, context: CallbackContext):
     msg = update.message.reply_to_message
     if not msg:
-        update.message.reply_text("Reply to message to broadcast.")
+        update.message.reply_text("Reply to a message to broadcast.")
         return
 
     users = load_users()
     success = failed = 0
-    update.message.reply_text(f"Sending to {len(users)} users...")
+    sent_msg = update.message.reply_text(f"Broadcasting to {len(users)} users...")
+    
     for uid in users:
         try:
             msg.copy(uid)
@@ -219,50 +238,28 @@ def broadcast(update: Update, context: CallbackContext):
         except:
             failed += 1
         time.sleep(0.05)
-    update.message.reply_text(f"Done! Success: {success} | Failed: {failed}")
 
-# ---------- /scarqueen1 - Update Welcome ----------
-@owner_only
-def scarqueen1(update: Update, context: CallbackContext):
-    msg = update.message.reply_to_message
-    if not msg or (not msg.photo and not msg.document):
-        update.message.reply_text("Reply to a photo!")
-        return
+    sent_msg.edit_text(f"Broadcast Done!\nSuccess: {success} | Failed: {failed}")
 
-    photo = msg.photo[-1].file_id if msg.photo else msg.document.file_id
-    caption = msg.caption or "Lusty flirt"
+# ---------- Fallback: Any random message ----------
+def fallback_random_message(update: Update, context: CallbackContext):
+    update.message.reply_text("send /start for main menu")
 
-    # Extract inline buttons
-    buttons = []
-    clean_caption = caption
-    matches = re.findall(r"(https?://[^\s]+)\s*[-–—]?\s*([^\n]+)", caption)
-    for url, title in matches:
-        title = title.strip(" -–—.")
-        if title:
-            buttons.append({"url": url.strip(), "text": title})
-
-    clean_caption = re.sub(r"https?://[^\s]+.*?\n", "", clean_caption)
-    clean_caption = re.sub(r"\n+", "\n", clean_caption.strip())
-    if not clean_caption.strip():
-        clean_caption = "Lusty flirt"
-
-    save_welcome(photo, clean_caption, buttons)
-    global welcome_data
-    welcome_data = load_welcome()
-    update.message.reply_text("Welcome updated!")
-
-# ---------- Handlers ----------
+# ------------------- Handlers Registration -------------------
 dispatcher.add_handler(CommandHandler("start", start))
 dispatcher.add_handler(CommandHandler("scarqueen", broadcast))
 dispatcher.add_handler(CommandHandler("scarqueen1", scarqueen1))
 
-# Button clicks (text from keyboard)
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_button_click))
+# Persistent keyboard button clicks
+dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_keyboard_click))
 
-# Fallback
-dispatcher.add_handler(MessageHandler(~Filters.command & ~Filters.text, lambda u, c: u.message.reply_text("send /start for update...")))
+# This must come AFTER keyboard handler - catches all other text
+dispatcher.add_handler(MessageHandler(Filters.text & Filters.regex(r'^[^/].*'), fallback_random_message))
 
-# ---------- Webhook ----------
+# Non-text messages (stickers, voice, etc.)
+dispatcher.add_handler(MessageHandler(~Filters.command & ~Filters.text, fallback_random_message))
+
+# ------------------- Webhook & Server -------------------
 @app.route('/' + TOKEN, methods=['POST'])
 def webhook():
     update = Update.de_json(request.get_json(force=True), bot)
@@ -274,9 +271,10 @@ def index():
     return 'Bot is running!'
 
 def set_webhook():
-    info = bot.get_webhook_info()
-    if info.url != WEBHOOK_URL:
+    current = bot.get_webhook_info().url
+    if current != WEBHOOK_URL:
         bot.set_webhook(url=WEBHOOK_URL)
+        print("Webhook set!")
 
 def keep_alive():
     while True:
